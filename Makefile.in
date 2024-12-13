@@ -73,6 +73,7 @@ EXAMPLES = \
 	bin/paex_pink \
 	bin/paex_read_write_wire \
 	bin/paex_record \
+	bin/record_sentences \
 	bin/paex_saw \
 	bin/paex_sine \
 	bin/paex_write_sine \

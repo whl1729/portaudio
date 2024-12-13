@@ -1,82 +1,25 @@
-/** @file paex_record.c
-    @ingroup examples_src
-    @brief Record input into an array; Save array to a file; Playback recorded data.
-    @author Phil Burk  http://www.softsynth.com
-*/
-/*
- * $Id$
- *
- * This program uses the PortAudio Portable Audio Library.
- * For more information see: http://www.portaudio.com
- * Copyright (c) 1999-2000 Ross Bencina and Phil Burk
- *
- * Permission is hereby granted, free of charge, to any person obtaining
- * a copy of this software and associated documentation files
- * (the "Software"), to deal in the Software without restriction,
- * including without limitation the rights to use, copy, modify, merge,
- * publish, distribute, sublicense, and/or sell copies of the Software,
- * and to permit persons to whom the Software is furnished to do so,
- * subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be
- * included in all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR
- * ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
- * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
- * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
- */
-
-/*
- * The text above constitutes the entire PortAudio license; however,
- * the PortAudio community also makes the following non-binding requests:
- *
- * Any person wishing to distribute modifications to the Software is
- * requested to send the modifications to the original developer so that
- * they can be incorporated into the canonical version. It is also
- * requested that these non-binding requests be included along with the
- * license above.
- */
-
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include "portaudio.h"
 
 /* #define SAMPLE_RATE  (17932) // Test failure to open with this value. */
-#define SAMPLE_RATE  (44100)
+#define SAMPLE_RATE  (16000)
 #define FRAMES_PER_BUFFER (512)
-#define NUM_SECONDS     (5)
+#define NUM_SECONDS     (10)
+#define NUM_FRAME  (SAMPLE_RATE * NUM_SECONDS)
 #define NUM_CHANNELS    (1)
 /* #define DITHER_FLAG     (paDitherOff) */
 #define DITHER_FLAG     (0) /**/
 /** Set to 1 if you want to capture the recording to a file. */
-#define WRITE_TO_FILE   (1)
 
 /* Select sample format. */
-#if 1
-#define PA_SAMPLE_TYPE  paFloat32
-typedef float SAMPLE;
-#define SAMPLE_SILENCE  (0.0f)
-#define PRINTF_S_FORMAT "%.8f"
-#elif 1
 #define PA_SAMPLE_TYPE  paInt16
+#define BITS_PER_SAMPLE 16
 typedef short SAMPLE;
 #define SAMPLE_SILENCE  (0)
 #define PRINTF_S_FORMAT "%d"
-#elif 0
-#define PA_SAMPLE_TYPE  paInt8
-typedef char SAMPLE;
-#define SAMPLE_SILENCE  (0)
-#define PRINTF_S_FORMAT "%d"
-#else
-#define PA_SAMPLE_TYPE  paUInt8
-typedef unsigned char SAMPLE;
-#define SAMPLE_SILENCE  (128)
-#define PRINTF_S_FORMAT "%d"
-#endif
 
 typedef struct
 {
@@ -85,6 +28,74 @@ typedef struct
     SAMPLE      *recordedSamples;
 }
 paTestData;
+
+
+// WAV 文件头结构
+#pragma pack(push, 1)
+typedef struct {
+    char riff[4];                // "RIFF"
+    uint32_t fileSize;           // 4 + (size of the rest of the file)
+    char wave[4];                // "WAVE"
+    char fmt[4];                 // "fmt "
+    uint32_t fmtSize;            // 16 for PCM
+    uint16_t audioFormat;        // PCM = 1
+    uint16_t numChannels;        // Number of channels (1 for mono, 2 for stereo)
+    uint32_t sampleRate;         // Sample rate (e.g., 44100)
+    uint32_t byteRate;           // SampleRate * NumChannels * BitsPerSample / 8
+    uint16_t blockAlign;         // NumChannels * BitsPerSample / 8
+    uint16_t bitsPerSample;      // Bits per sample (e.g., 16)
+    char data[4];                // "data"
+    uint32_t dataSize;           // Number of bytes of audio data
+} WaveHeader;
+#pragma pack(pop)
+
+// 保存原始音频数据为WAV文件
+int save_wav(
+        const char *filename,
+        const int16_t *audioData,
+        uint32_t sampleRate,
+        uint16_t numChannels,
+        uint16_t bitsPerSample,
+        uint32_t numSamples
+    )
+{
+    FILE *outFile = fopen(filename, "wb");
+    if (!outFile) {
+        printf("Error opening file for writing.\n");
+        return -1;
+    }
+
+    // 计算文件大小
+    uint32_t dataSize = numSamples * numChannels * bitsPerSample / 8;  // 数据大小
+    uint32_t fileSize = 36 + dataSize;  // WAV文件总大小（文件头 + 数据）
+
+    // 创建 WAV 文件头
+    WaveHeader header;
+    memset(&header, 0, sizeof(header));
+    memcpy(header.riff, "RIFF", 4);
+    header.fileSize = fileSize - 8; // 文件头大小减去 "RIFF" 和文件大小字段
+    memcpy(header.wave, "WAVE", 4);
+    memcpy(header.fmt, "fmt ", 4);
+    header.fmtSize = 16;  // 对于PCM，fmt chunk的大小是16
+    header.audioFormat = 1;  // PCM 格式
+    header.numChannels = numChannels;
+    header.sampleRate = sampleRate;
+    header.byteRate = sampleRate * numChannels * bitsPerSample / 8;
+    header.blockAlign = numChannels * bitsPerSample / 8;
+    header.bitsPerSample = bitsPerSample;
+    memcpy(header.data, "data", 4);
+    header.dataSize = dataSize;
+
+    // 写入文件头
+    fwrite(&header, sizeof(WaveHeader), 1, outFile);
+
+    // 写入音频数据
+    fwrite(audioData, sizeof(int16_t), numSamples * numChannels, outFile);
+
+    fclose(outFile);
+    printf("WAV file saved successfully to %s\n", filename);
+    return 0;
+}
 
 /* This routine will be called by the PortAudio engine when audio is needed.
 ** It may be called at interrupt level on some machines so don't do anything
@@ -192,8 +203,7 @@ static int playCallback( const void *inputBuffer, void *outputBuffer,
 }
 
 /*******************************************************************/
-int main(void);
-int main(void)
+int main()
 {
     PaStreamParameters  inputParameters,
                         outputParameters;
@@ -209,7 +219,7 @@ int main(void)
 
     printf("patest_record.c\n"); fflush(stdout);
 
-    data.maxFrameIndex = totalFrames = NUM_SECONDS * SAMPLE_RATE; /* Record for a few seconds. */
+    data.maxFrameIndex = totalFrames = NUM_FRAME; /* Record for a few seconds. */
     data.frameIndex = 0;
     numSamples = totalFrames * NUM_CHANNELS;
     numBytes = numSamples * sizeof(SAMPLE);
@@ -279,23 +289,12 @@ int main(void)
     printf("sample max amplitude = "PRINTF_S_FORMAT"\n", max );
     printf("sample average = %lf\n", average );
 
-    /* Write recorded data to a file. */
-#if WRITE_TO_FILE
-    {
-        FILE  *fid;
-        fid = fopen("recorded.raw", "wb");
-        if( fid == NULL )
-        {
-            printf("Could not open file.");
-        }
-        else
-        {
-            fwrite( data.recordedSamples, NUM_CHANNELS * sizeof(SAMPLE), totalFrames, fid );
-            fclose( fid );
-            printf("Wrote data to 'recorded.raw'\n");
-        }
-    }
-#endif
+    save_wav("recorded.wav",
+            data.recordedSamples,
+            SAMPLE_RATE,
+            NUM_CHANNELS,
+            BITS_PER_SAMPLE,
+            numSamples);
 
     /* Playback recorded data.  -------------------------------------------- */
     data.frameIndex = 0;
