@@ -2,7 +2,8 @@
 
 macro(add_example appl_name)
   add_executable(${appl_name} "${appl_name}.c")
-  target_link_libraries(${appl_name} portaudio)
+  link_directories("/home/along/src/portaudio/libs/x86_64")
+  target_link_libraries(${appl_name} portaudio fvad)
   if(UNIX)
     target_link_libraries(${appl_name} m)
   endif()

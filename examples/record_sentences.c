@@ -2,12 +2,15 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "portaudio.h"
+#include "fvad.h"
 
 /* #define SAMPLE_RATE  (17932) // Test failure to open with this value. */
 #define SAMPLE_RATE  (16000)
-#define FRAMES_PER_BUFFER (512)
-#define NUM_SECONDS     (10)
+#define FRAME_TIME  (30)  // ms
+#define FRAMES_PER_BUFFER (SAMPLE_RATE / 1000 * FRAME_TIME)
+#define NUM_SECONDS     (20)
 #define NUM_FRAME  (SAMPLE_RATE * NUM_SECONDS)
 #define NUM_CHANNELS    (1)
 /* #define DITHER_FLAG     (paDitherOff) */
@@ -151,58 +154,6 @@ static int recordCallback( const void *inputBuffer, void *outputBuffer,
     return finished;
 }
 
-/* This routine will be called by the PortAudio engine when audio is needed.
-** It may be called at interrupt level on some machines so don't do anything
-** that could mess up the system like calling malloc() or free().
-*/
-static int playCallback( const void *inputBuffer, void *outputBuffer,
-                         unsigned long framesPerBuffer,
-                         const PaStreamCallbackTimeInfo* timeInfo,
-                         PaStreamCallbackFlags statusFlags,
-                         void *userData )
-{
-    paTestData *data = (paTestData*)userData;
-    SAMPLE *rptr = &data->recordedSamples[data->frameIndex * NUM_CHANNELS];
-    SAMPLE *wptr = (SAMPLE*)outputBuffer;
-    unsigned int i;
-    int finished;
-    unsigned int framesLeft = data->maxFrameIndex - data->frameIndex;
-
-    (void) inputBuffer; /* Prevent unused variable warnings. */
-    (void) timeInfo;
-    (void) statusFlags;
-    (void) userData;
-
-    if( framesLeft < framesPerBuffer )
-    {
-        /* final buffer... */
-        for( i=0; i<framesLeft; i++ )
-        {
-            *wptr++ = *rptr++;  /* left */
-            if( NUM_CHANNELS == 2 ) *wptr++ = *rptr++;  /* right */
-        }
-        for( ; i<framesPerBuffer; i++ )
-        {
-            *wptr++ = 0;  /* left */
-            if( NUM_CHANNELS == 2 ) *wptr++ = 0;  /* right */
-        }
-        data->frameIndex += framesLeft;
-        finished = paComplete;
-    }
-    else
-    {
-        for( i=0; i<framesPerBuffer; i++ )
-        {
-            *wptr++ = *rptr++;  /* left */
-            if( NUM_CHANNELS == 2 ) *wptr++ = *rptr++;  /* right */
-        }
-        data->frameIndex += framesPerBuffer;
-        finished = paContinue;
-    }
-    return finished;
-}
-
-/*******************************************************************/
 int main()
 {
     PaStreamParameters  inputParameters,
@@ -260,82 +211,53 @@ int main()
     if( err != paNoError ) goto done;
     printf("\n=== Now recording!! Please speak into the microphone. ===\n"); fflush(stdout);
 
-    while( ( err = Pa_IsStreamActive( stream ) ) == 1 )
+    Fvad *vad = fvad_new();
+    if (!vad) {
+        fprintf(stderr, "out of memory\n");
+        goto done;
+    }
+
+    if (fvad_set_sample_rate(vad, SAMPLE_RATE) < 0) {
+        fprintf(stderr, "invalid sample rate: %d Hz\n", SAMPLE_RATE);
+        goto done;
+    }
+
+    struct timespec currentTime;
+    clock_gettime(CLOCK_MONOTONIC, &currentTime);
+    double currentTimeSec = currentTime.tv_sec + currentTime.tv_nsec / 1e9;
+    double activeTimeSec = currentTimeSec; // 初始化为当前时间
+    int processIndex = 0; 
+    int vadres = 1;
+    while (vadres == 1 || currentTimeSec < activeTimeSec + 0.5)
     {
-        Pa_Sleep(1000);
-        printf("index = %d\n", data.frameIndex ); fflush(stdout);
+        Pa_Sleep(FRAME_TIME);
+        clock_gettime(CLOCK_MONOTONIC, &currentTime);
+        currentTimeSec = currentTime.tv_sec + currentTime.tv_nsec / 1e9;
+        if (data.frameIndex < processIndex + FRAMES_PER_BUFFER) {
+            continue;
+        }
+
+        printf("vadres = %d, index = %d\n", vadres, data.frameIndex ); fflush(stdout);
+        vadres = fvad_process(vad,
+                              data.recordedSamples + processIndex,
+                              FRAMES_PER_BUFFER);
+        processIndex += FRAMES_PER_BUFFER;
+
+        if (vadres == 1) {
+            activeTimeSec = currentTimeSec;
+        }
     }
     if( err < 0 ) goto done;
 
     err = Pa_CloseStream( stream );
     if( err != paNoError ) goto done;
 
-    /* Measure maximum peak amplitude. */
-    max = 0;
-    average = 0.0;
-    for( i=0; i<numSamples; i++ )
-    {
-        val = data.recordedSamples[i];
-        if( val < 0 ) val = -val; /* ABS */
-        if( val > max )
-        {
-            max = val;
-        }
-        average += val;
-    }
-
-    average = average / (double)numSamples;
-
-    printf("sample max amplitude = "PRINTF_S_FORMAT"\n", max );
-    printf("sample average = %lf\n", average );
-
     save_wav("recorded.wav",
             data.recordedSamples,
             SAMPLE_RATE,
             NUM_CHANNELS,
             BITS_PER_SAMPLE,
-            numSamples);
-
-    /* Playback recorded data.  -------------------------------------------- */
-    data.frameIndex = 0;
-
-    outputParameters.device = Pa_GetDefaultOutputDevice(); /* default output device */
-    if (outputParameters.device == paNoDevice) {
-        fprintf(stderr,"Error: No default output device.\n");
-        goto done;
-    }
-    outputParameters.channelCount = NUM_CHANNELS;
-    outputParameters.sampleFormat =  PA_SAMPLE_TYPE;
-    outputParameters.suggestedLatency = Pa_GetDeviceInfo( outputParameters.device )->defaultLowOutputLatency;
-    outputParameters.hostApiSpecificStreamInfo = NULL;
-
-    printf("\n=== Now playing back. ===\n"); fflush(stdout);
-    err = Pa_OpenStream(
-              &stream,
-              NULL, /* no input */
-              &outputParameters,
-              SAMPLE_RATE,
-              FRAMES_PER_BUFFER,
-              paClipOff,      /* we won't output out of range samples so don't bother clipping them */
-              playCallback,
-              &data );
-    if( err != paNoError ) goto done;
-
-    if( stream )
-    {
-        err = Pa_StartStream( stream );
-        if( err != paNoError ) goto done;
-
-        printf("Waiting for playback to finish.\n"); fflush(stdout);
-
-        while( ( err = Pa_IsStreamActive( stream ) ) == 1 ) Pa_Sleep(100);
-        if( err < 0 ) goto done;
-
-        err = Pa_CloseStream( stream );
-        if( err != paNoError ) goto done;
-
-        printf("Done.\n"); fflush(stdout);
-    }
+            data.frameIndex);
 
 done:
     Pa_Terminate();
